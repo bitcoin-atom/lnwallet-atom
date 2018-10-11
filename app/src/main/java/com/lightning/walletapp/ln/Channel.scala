@@ -479,8 +479,15 @@ abstract class Channel extends StateMachine[ChannelData] { me =>
 
       case (some: HasCommitments, newAnn: NodeAnnouncement, SLEEPING)
         if some.announce.nodeId == newAnn.nodeId && Announcements.checkSig(newAnn) =>
-        // Node was SLEEPING for a long time so we have initiated a new announcement search
+        // Node was SLEEPING for a long time so we have initiated a new address search
         data = me STORE some.modify(_.announce).setTo(newAnn)
+
+
+      case (some: HasCommitments, newAnn: NodeAnnouncement, REFUNDING)
+        if some.announce.nodeId == newAnn.nodeId && Announcements.checkSig(newAnn) =>
+        // Remote peer's address may have changed since a channel backup has been made
+        // we need to update data for next reconnect attempt to use it, but not save it
+        data = some.modify(_.announce).setTo(newAnn)
 
 
       case (wait: WaitBroadcastRemoteData, CMDOffline, WAIT_FUNDING_DONE) => BECOME(wait, SLEEPING)
