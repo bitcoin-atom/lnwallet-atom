@@ -26,8 +26,10 @@ import java.net.{InetAddress, InetSocketAddress}
 import fr.acinq.bitcoin.Crypto.{Point, PublicKey}
 import android.content.{ClipData, ClipboardManager, Context}
 import fr.acinq.bitcoin.{BinaryData, Crypto, MilliSatoshi, Satoshi}
+
 import com.lightning.walletapp.ln.wire.LightningMessageCodecs.revocationInfoCodec
 import com.lightning.walletapp.ln.wire.LightningMessageCodecs.RGB
+import org.bitcoinj.core.listeners.PeerDisconnectedEventListener
 import com.lightning.walletapp.lnutils.olympus.OlympusWrap
 import com.lightning.walletapp.lnutils.olympus.UploadAct
 import concurrent.ExecutionContext.Implicits.global
@@ -149,11 +151,8 @@ class WalletApp extends Application { me =>
     }
 
     def setupAndStartDownload = {
-      wallet.addTransactionConfidenceEventListener(ChannelManager.chainEventsListener)
-      wallet.addCoinsReceivedEventListener(ChannelManager.chainEventsListener)
-      wallet.addCoinsSentEventListener(ChannelManager.chainEventsListener)
-      wallet.autosaveToFile(walletFile, 1000, MILLISECONDS, null)
       wallet.setCoinSelector(new MinDepthReachedCoinSelector)
+      wallet.autosaveToFile(walletFile, 1000, MILLISECONDS, null)
 
       Future {
         val host = Uri.parse(OlympusWrap.clouds.head.connector.url).getHost
@@ -161,8 +160,12 @@ class WalletApp extends Application { me =>
         peerGroup addAddress peer
       }
 
+      wallet.addCoinsSentEventListener(ChannelManager.chainEventsListener)
+      wallet.addCoinsReceivedEventListener(ChannelManager.chainEventsListener)
+      wallet.addTransactionConfidenceEventListener(ChannelManager.chainEventsListener)
+      peerGroup.addDisconnectedEventListener(ChannelManager.chainEventsListener)
       peerGroup addPeerDiscovery new DnsDiscovery(params)
-      peerGroup.setMinRequiredProtocolVersion(70020)
+      peerGroup.setMinRequiredProtocolVersion(70015)
       peerGroup.setDownloadTxDependencies(0)
       peerGroup.setPingIntervalMsec(10000)
       peerGroup.setMaxConnections(5)
@@ -211,25 +214,31 @@ object ChannelManager extends Broadcaster {
     } ConnectionManager.connectTo(announce, notify = false)
   }
 
-  val chainEventsListener = new TxTracker with BlocksListener {
-    override def onChainDownloadStarted(peer: Peer, left: Int) = onChainDownload(left)
+  val chainEventsListener = new TxTracker with BlocksListener with PeerDisconnectedEventListener {
+    def onPeerDisconnected(connectedPeer: Peer, numPeers: Int) = if (numPeers < 1) onBlock = oneTimeRun
+    def onBlocksDownloaded(p: Peer, b: Block, fb: FilteredBlock, left: Int) = onBlock(left)
+    override def onChainDownloadStarted(peer: Peer, left: Int) = onBlock(left)
+
     override def txConfirmed(txj: Transaction) = for (c <- notClosing) c process CMDConfirmed(txj)
-    def onBlocksDownloaded(p: Peer, b: Block, fb: FilteredBlock, left: Int) = onChainDownload(left)
     def onCoinsReceived(w: Wallet, txj: Transaction, a: Coin, b: Coin) = onChainTx(txj)
     def onCoinsSent(w: Wallet, txj: Transaction, a: Coin, b: Coin) = onChainTx(txj)
 
-    def onChainDownload(blocksLeft: Int) = {
-      // Track progress and how many blocks done
-      currentBlocksLeft = blocksLeft
-
-      if (currentBlocksLeft < 1) {
-        val cmd = CMDBestHeight(currentHeight, initialChainHeight)
-        // Update initial height to prevent repeated HTLC warnings
-        initialChainHeight = cmd.heightNow
-        PaymentInfoWrap.resolvePending
-        for (c <- all) c process cmd
-      }
+    var onBlock: Int => Unit = oneTimeRun
+    lazy val oneTimeRun: Int => Unit = left => {
+      // Let currentBlocksLeft become less than MaxValue
+      runAnd(onBlock = standardRun)(standardRun apply left)
+      val cmd = CMDBestHeight(currentHeight, initialChainHeight)
+      for (channel <- all) channel process cmd
+      PaymentInfoWrap.resolvePending
     }
+
+    lazy val standardRun: Int => Unit = left =>
+      // LN payment before BTC peers on app start: tried in `oneTimeRun`
+      // LN payment before BTC peers on app restart: tried in `oneTimeRun`
+      // LN payment after BTC peers on app start: tried immediately since `currentBlocksLeft` < `Int.MacValue`
+      // LN payment after BTC peers on app restart: tried immediately since `currentBlocksLeft` < `Int.MacValue`
+      // LN payment after BTC peers disconnected: tried in `oneTimeRun` because `onPeerDisconnected` resets `onBlock`
+      if (currentBlocksLeft < 1) initialChainHeight = currentHeight else currentBlocksLeft = left
 
     def onChainTx(txj: Transaction) = {
       val cmdOnChainSpent = CMDSpent(txj)
