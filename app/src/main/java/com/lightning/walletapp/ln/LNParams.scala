@@ -114,7 +114,7 @@ trait Broadcaster extends ChannelListener {
     parentDepth -> parentIsDead -> (cltvDelay + csvDelay)
   }
 
-  val blocksPerDay = 144
+  val blocksPerDay = 288 // 144 for PoW and another 144 for PoS
   def csvShowDelayed(t1: TransactionWithInputInfo, t2: TransactionWithInputInfo, commitTx: Transaction) =
     ShowDelayed(parent = csv(t1.tx, t2.tx), t2.tx, commitTx, fee = t1 -- t2, t2.tx.allOutputsAmount)
 }
