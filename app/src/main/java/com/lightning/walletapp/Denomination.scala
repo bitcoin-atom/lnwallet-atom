@@ -90,7 +90,7 @@ object BtcDenomination extends Denomination {
 
   fmt setDecimalFormatSymbols symbols
   def withSign(msat: MilliSatoshi) =
-    formatted(msat) + "\u00A0btc"
+    formatted(msat) + "\u00A0bca"
 
   def formatted(msat: MilliSatoshi) = {
     val basicFormattedSum = asString(msat)
