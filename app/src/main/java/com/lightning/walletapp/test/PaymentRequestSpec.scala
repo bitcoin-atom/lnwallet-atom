@@ -1,101 +1,124 @@
 package com.lightning.walletapp.test
 
+import com.lightning.walletapp.ChannelManager
+import com.lightning.walletapp.helper.AES
+import com.lightning.walletapp.ln.LNParams._
 import com.lightning.walletapp.ln._
-import com.lightning.walletapp.ln.wire.{ChannelUpdate, Hop}
-import fr.acinq.bitcoin.{BinaryData, Block, Btc, Crypto, MilliBtc, MilliSatoshi, Satoshi}
-import fr.acinq.bitcoin.Crypto.{PrivateKey, PublicKey}
+import com.lightning.walletapp.ln.Tools._
+import com.lightning.walletapp.ln.wire._
+import com.lightning.walletapp.ln.wire.LightningMessageCodecs._
+import com.lightning.walletapp.lnutils.{PaymentInfoWrap, RevokedInfoTable}
+import fr.acinq.bitcoin.{BinaryData, Transaction}
+import fr.acinq.bitcoin.Crypto.{Point, PublicKey}
+import scodec.DecodeResult
+import scodec.bits.BitVector
 
-/**
-  * Created by anton on 13.07.17.
-  */
-class PaymentRequestSpec {
+class RevokedInfoSpec {
+  val chanId1 = BinaryData(random getBytes 32)
+  val chanId2 = BinaryData(random getBytes 32)
+
+  val ri = RevocationInfo(redeemScriptsToSigs = Nil, claimMainTxSig = None, claimPenaltyTxSig = None, LNParams.broadcaster.perKwThreeSat,
+    LNParams.dust.amount, randomPrivKey.publicKey, 144, randomPrivKey.publicKey, randomPrivKey.publicKey, randomPrivKey.publicKey)
+
+  val txid1 = BinaryData(random getBytes 32)
+  val txid2 = BinaryData(random getBytes 32)
+  val txid3 = BinaryData(random getBytes 32)
+  val txid4 = BinaryData(random getBytes 32)
+
+  val txid5 = BinaryData(random getBytes 32)
+  val txid6 = BinaryData(random getBytes 32)
+  val txid7 = BinaryData(random getBytes 32)
+  val txid8 = BinaryData(random getBytes 32)
 
   def allTests = {
-    import com.lightning.walletapp.ln.PaymentRequest._
+    val serialized1 = LightningMessageCodecs.serialize(revocationInfoCodec encode ri)
+    // Sent 3 outgoing payments in chan1
+    db.change(RevokedInfoTable.newSql, txid1, chanId1, 1000000000L, serialized1)
+    db.change(RevokedInfoTable.newSql, txid2, chanId1, 800000000L, serialized1)
+    db.change(RevokedInfoTable.newSql, txid3, chanId1, 600000000L, serialized1)
+    // Then got back an incoming payment in chan1
+    db.change(RevokedInfoTable.newSql, txid4, chanId1, 900000000L, serialized1)
 
-    val priv = PrivateKey(BinaryData("e126f68f7eafcc8b74f54d269fe206be715000f94dac067d1c04a8ca3b2db734"), compressed = true)
-    val pub = priv.publicKey
-    val nodeId = pub
-    assert(nodeId == PublicKey(BinaryData("03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad")))
 
-    {
-      println("check minimal unit is used")
-      assert('p' == Amount.unit(MilliSatoshi(1)))
-      assert('p' == Amount.unit(MilliSatoshi(99)))
-      assert('n' == Amount.unit(MilliSatoshi(100)))
-      assert('p' == Amount.unit(MilliSatoshi(101)))
-      assert('n' == Amount.unit(Satoshi(1)))
-      assert('u' == Amount.unit(Satoshi(100)))
-      assert('n' == Amount.unit(Satoshi(101)))
-      assert('u' == Amount.unit(Satoshi(1155400)))
-      assert('m' == Amount.unit(MilliBtc(1)))
-      assert('m' == Amount.unit(MilliBtc(10)))
-      assert('m' == Amount.unit(Btc(1)))
+    val c1 = Commitments(
+      localParams = null,
+      remoteParams = null,
+      LocalCommit(index = 0L, spec = CommitmentSpec(0L, toLocalMsat = 900000000L, toRemoteMsat = 0L), null, null),
+      remoteCommit = null,
+      localChanges = null,
+      remoteChanges = null,
+      localNextHtlcId = 0L,
+      remoteNextHtlcId = 0L,
+      remoteNextCommitInfo = null,
+      commitInput = null,
+      remotePerCommitmentSecrets = null,
+      channelId = chanId1)
+
+    val chan1 = new Channel {
+      override def REV(cs: Commitments, rev: RevokeAndAck): Unit = none
+      override def SEND(msg: LightningMessage): Unit = none
+      override def ASKREFUNDTX(ref: RefundingData): Unit = none
+      override def STORE(content: HasCommitments): HasCommitments = content
+      override def ASKREFUNDPEER(some: HasCommitments, point: Point): Unit = none
+      override def CLOSEANDWATCH(close: ClosingData): Unit = none
+      override def GETREV(tx: Transaction): Option[RevokedCommitPublished] = None
+      data = NormalData(announce = null, commitments = c1)
     }
 
-    {
-      println("check that we can still decode non-minimal amount encoding")
-      assert(Some(MilliSatoshi(100000000)) == Amount.decode("1000u"))
-      assert(Some(MilliSatoshi(100000000)) == Amount.decode("1000000n"))
-      assert(Some(MilliSatoshi(100000000)) == Amount.decode("1000000000p"))
+
+    db.change(RevokedInfoTable.newSql, txid5, chanId2, 1000000000L, serialized1)
+    // Attempted to send an outgoing payment in chan2
+    db.change(RevokedInfoTable.newSql, txid6, chanId2, 500000000L, serialized1)
+    // But payment got rejected and refunded so we got our full balance back
+    // We also sent another small payment which has also been rejected
+    db.change(RevokedInfoTable.newSql, txid7, chanId2, 999999990L, serialized1)
+    db.change(RevokedInfoTable.newSql, txid8, chanId2, 1000000000L, serialized1)
+
+
+    val c2 = Commitments(localParams = null,
+      remoteParams = null,
+      LocalCommit(index = 0L, spec = CommitmentSpec(0L, toLocalMsat = 1000000000L, toRemoteMsat = 0L), null, null),
+      remoteCommit = null,
+      localChanges = null,
+      remoteChanges = null,
+      localNextHtlcId = 0L,
+      remoteNextHtlcId = 0L,
+      remoteNextCommitInfo = null,
+      commitInput = null,
+      remotePerCommitmentSecrets = null,
+      channelId = chanId2)
+
+    val chan2 = new Channel {
+      override def REV(cs: Commitments, rev: RevokeAndAck): Unit = none
+      override def SEND(msg: LightningMessage): Unit = none
+      override def ASKREFUNDTX(ref: RefundingData): Unit = none
+      override def STORE(content: HasCommitments): HasCommitments = content
+      override def ASKREFUNDPEER(some: HasCommitments, point: Point): Unit = none
+      override def CLOSEANDWATCH(close: ClosingData): Unit = none
+      override def GETREV(tx: Transaction): Option[RevokedCommitPublished] = None
+      data = NormalData(announce = null, commitments = c2)
     }
 
-    {
-      println("Please make a donation of any amount using payment_hash 0001020304050607080900010203040506070809000102030405060708090102 to me @03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad")
-      val ref = "lnbca1pdw3gtxpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaqru9gnlrrvancfg5thgvkm63cac0rrvgrlrg3kq0q7e70l0vkaymjh567kr5658up4wnvgqc23shpykjvzf850kxl04p7jzksg57zvcqpklufl8"
-      val pr = PaymentRequest.read(ref)
-      assert(pr.prefix == "lnbca")
-      assert(pr.amount.isEmpty)
-      assert(pr.paymentHash == BinaryData("0001020304050607080900010203040506070809000102030405060708090102"))
-      assert(pr.timestamp == 1525195110L)
-      assert(pr.nodeId == PublicKey(BinaryData("03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad")))
-      assert(pr.tags.size == 2)
-      assert(PaymentRequest.write(pr.sign(priv)) == ref)
-    }
+    val cerberusAct = PaymentInfoWrap.getCerberusActs(Vector(chan1, chan2).flatMap(PaymentInfoWrap.getVulnerableRevInfos).toMap).next
+    val cerberusPayloadHex = cerberusAct.data.toString
 
-    {
-      println("Please send $3 for a cup of coffee to the same peer, within 1 minute")
-      val ref = "lnbca2500u1pdwjmwgpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsfzme726098qkvw2dzxcqxp6wtde5cx3dzt34q5m6fnpc6fgazh094r4x6chh3gtmdwfsww2lf8s5ydzulwysgqkg0d3y2a64vepew5squwyrgl"
-      val pr = PaymentRequest.read(ref)
-      assert(pr.prefix == "lnbca")
-      assert(pr.amount == Some(MilliSatoshi(250000000L)))
-      assert(pr.paymentHash == BinaryData("0001020304050607080900010203040506070809000102030405060708090102"))
-      assert(pr.timestamp == 1525247432L)
-      assert(pr.nodeId == PublicKey(BinaryData("03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad")))
-      assert(PaymentRequest.write(pr.sign(priv)) == ref)
-    }
+    // Taken from Olympus
+    val cerberusPayloadBitVec = BitVector(BinaryData(cerberusPayloadHex).data)
+    val cerberusPayloadDecoded = cerberusPayloadCodec decode cerberusPayloadBitVec
+    val CerberusPayload(aesZygotes, halfTxIds) = cerberusPayloadDecoded.require.value
 
-    {
-      println("The same, on testnet, with a fallback address 2My3DfZgsrAirUsf89rdc631TLqdB6vxGSj")
-      val ref = "lntbca20m1pdwjatfpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdzafahx2grsd9jkxefqdanzqcmgda3k7mrpw3jjqcmpddjjcgr0dejjq6trv43hyetpd5sxxmmwv5kzqmmwv5s8q6trddkx2fppj879hue0yrdj3qwacc0teknxp5w4p59lysl04ddc2jpg57aulhj44arxf8slvfz9q0u79yglxxn4u24upr0xj2r00ne93wtqq70awwq0r93r5dtumcvp3wuh63v3jlcp5pje0flcpm8yk49"
-      val pr = PaymentRequest.read(ref)
-      assert(pr.prefix == "lntbca")
-      assert(pr.amount == Some(MilliSatoshi(2000000000L)))
-      assert(pr.paymentHash == BinaryData("0001020304050607080900010203040506070809000102030405060708090102"))
-      assert(pr.timestamp == 1525249385L)
-      assert(pr.nodeId == PublicKey(BinaryData("03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad")))
-      assert(pr.tags.collect { case u: UnknownTag => u }.size == 1) // fallback address
-      assert(pr.tags.size == 3)
-      assert(PaymentRequest.write(pr.sign(priv)) == ref)
-    }
+    assert(aesZygotes.size == halfTxIds.size)
+    assert(Set(txid2.toString take 16, txid3.toString take 16, txid6.toString take 16) == halfTxIds.toSet)
 
-    {
-      println("On mainnet, with fallback address 2My3DfZgsrAirUsf89rdc631TLqdB6vxGSj with extra routing info to go via nodes 029e03a901b85534ff1e92c43c74431f7ce72046060fcf7a95c37e148f78c77255 then 039e03a901b85534ff1e92c43c74431f7ce72046060fcf7a95c37e148f78c77255")
-      val ref = "lnbca20m1pdwj708pp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdzafahx2grsd9jkxefqdanzqcmgda3k7mrpw3jjqcmpddjjcgr0dejjq6trv43hyetpd5sxxmmwv5kzqmmwv5s8q6trddkx2fppj879hue0yrdj3qwacc0teknxp5w4p59lyr9yq20q82gphp2nflc7jtzrcazrra7wwgzxqc8u7754cdlpfrmccae92qqqqqqqqqqqqyqqqqq2qqqqqzcqpspeuqafqxu92d8lr6fvg0r5gv0heeeqgcrqlnm6jhphu9y00rrhy4gqqqqqqqqqqqpqqqqqpgqqqqqtqqxq0xsd753tkksaqxw4r8z6lsngn2s5x68sxgd6pmxcctxjcf69vef4axeauz5qggp39s5afyruj7fny3nvtxqwv85n42acydpwgeeszkcq99udl8"
-      val pr = PaymentRequest.read(ref)
-      assert(pr.prefix == "lnbca")
-      assert(pr.amount == Some(MilliSatoshi(2000000000L)))
-      assert(pr.paymentHash == BinaryData("0001020304050607080900010203040506070809000102030405060708090102"))
-      assert(pr.timestamp == 1525250535L)
-      assert(pr.nodeId == PublicKey(BinaryData("03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad")))
+    for {
+    // Taken from Olympus
+      halfTxId \ aesz <- halfTxIds zip aesZygotes
+      fullTxidBin <- halfTxIds.zip(Vector(txid2, txid3)).toMap get halfTxId
+      revBitVec <- AES.decZygote(aesz, fullTxidBin) map BitVector.apply
+      DecodeResult(ri1, _) <- revocationInfoCodec.decode(revBitVec).toOption
+    } assert(ri1 == ri)
 
-      assert(pr.routingInfo == Vector(RoutingInfoTag(Vector(
-        Hop(PublicKey("029e03a901b85534ff1e92c43c74431f7ce72046060fcf7a95c37e148f78c77255"), 1, 12, 0, 10, 11),
-        Hop(PublicKey("039e03a901b85534ff1e92c43c74431f7ce72046060fcf7a95c37e148f78c77255"), 2, 12, 0, 10, 11)))
-      ))
-
-      assert(pr.tags.size == 4)
-      assert(PaymentRequest.write(pr.sign(priv)) == ref)
-    }
+    cerberusAct.onDone
+    assert(Vector(chan1, chan2).flatMap(PaymentInfoWrap.getVulnerableRevInfos).isEmpty)
   }
 }
